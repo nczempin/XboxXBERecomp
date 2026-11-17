@@ -108,6 +108,9 @@ constexpr bool AllKnown(const LayoutKey (&keys)[N]) {
 #ifndef XDK_CDevice_BackBufferScale
 #define XDK_CDevice_BackBufferScale 0xFFFFFFFFu
 #endif
+#ifndef XDK_CDevice_ProjectionViewport
+#define XDK_CDevice_ProjectionViewport 0xFFFFFFFFu
+#endif
 #ifndef XDK_CDevice_Viewport
 #define XDK_CDevice_Viewport 0xFFFFFFFFu
 #endif

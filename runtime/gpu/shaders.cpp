@@ -12,7 +12,7 @@ namespace gpu {
 namespace {
 
 std::string F(const char* fmt, ...) {
-    char buf[1024];
+    char buf[2048];
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
@@ -258,6 +258,7 @@ const char* kVsPrologue = R"(
     // precise: EQUAL depth passes need bit exact positions
     precise float4 R0 = 0, R1 = 0, R2 = 0, R3 = 0, R4 = 0, R5 = 0, R6 = 0, R7 = 0, R8 = 0, R9 = 0, R10 = 0, R11 = 0;
     precise float4 oPos = 0;
+    precise float4 clip_xv = 2, clip_xr = 0, clip_yv = 2, clip_yr = 0;
     precise float4 clip_zv = 0, clip_zr = 0, clip_wv = 1, clip_wr = 0;  // the vector and row of each dp4
     float4 oD0 = float4(0, 0, 0, 1), oD1 = 0, oB0 = float4(0, 0, 0, 1), oB1 = 0, oFog = 0, oPts = 1;
     float4 oT0 = float4(0, 0, 0, 1), oT1 = float4(0, 0, 0, 1), oT2 = float4(0, 0, 0, 1), oT3 = float4(0, 0, 0, 1);
@@ -695,18 +696,15 @@ bool ReadsConstant(const Tok& k, uint32_t index) {
     return constant && !relative && k.f(1, 13, 8) == index;
 }
 
-bool ReadsViewportOffset(const std::vector<uint32_t>& prog) {
-    for (size_t n = 0; n + 4 <= prog.size(); n += 4) {
-        if (ReadsConstant(Tok{&prog[n]}, kViewportOffsetConstant)) return true;
-    }
-    return false;
-}
-
+constexpr uint32_t kMacMad = 4;
 constexpr uint32_t kMacDph = 6;
 constexpr uint32_t kMacDp4 = 7;
 constexpr uint32_t kMacArl = 13;
-constexpr uint32_t kLaneZ = 2;  // kMask bits
+constexpr uint32_t kLaneX = 8;  // kMask bits
+constexpr uint32_t kLaneY = 4;
+constexpr uint32_t kLaneZ = 2;
 constexpr uint32_t kLaneW = 1;
+constexpr uint32_t kLaneXyz = kLaneX | kLaneY | kLaneZ;
 
 // the oPos lanes an instruction writes: by a dp4 or dph, and by anything else
 struct PosLanes {
@@ -729,6 +727,46 @@ PosLanes WrittenPosLanes(const Tok& k) {
     return {dot ? mac_lanes : 0, ilu_lanes | (dot ? 0 : mac_lanes)};
 }
 
+// XDK ProjectionViewport idiom: oPos.xyzw each from one dp4 or dph, then one mad oPos.xyz, oPos, r_inv_w, c[K]
+// adding the title's screen-space offset constant c[K] instead of c-37; returns K or -1
+int ProjectionViewportOffset(const std::vector<uint32_t>& prog) {
+    int x = 0, y = 0, z = 0, w = 0, off = -1;
+    for (size_t n = 0; n + 4 <= prog.size(); n += 4) {
+        Tok k{&prog[n]};
+        PosLanes p = WrittenPosLanes(k);
+        if (std::popcount(p.dot) > 1 || (p.other & kLaneW)) return -1;
+        x += (p.dot & kLaneX) != 0;
+        y += (p.dot & kLaneY) != 0;
+        z += (p.dot & kLaneZ) != 0;
+        w += (p.dot & kLaneW) != 0;
+        if (p.other) {
+            if (off >= 0 || p.dot || p.other != kLaneXyz || k.f(1, 21, 4) != kMacMad) return -1;
+            bool ilu_out = k.f(3, 11, 1) && (k.f(3, 3, 8) & 0xF) == 0 && k.f(3, 2, 1) == 1;
+            if (ilu_out) return -1;
+            bool a_pos = k.f(2, 26, 2) == 1 && k.f(2, 28, 4) == 12 && !k.f(1, 8, 1) &&
+                         k.f(1, 6, 2) == 0 && k.f(1, 4, 2) == 1 && k.f(1, 2, 2) == 2;
+            bool b_pos = k.f(2, 11, 2) == 1 && k.f(2, 13, 4) == 12 && !k.f(2, 25, 1) &&
+                         k.f(2, 23, 2) == 0 && k.f(2, 21, 2) == 1 && k.f(2, 19, 2) == 2;
+            bool c_const = k.f(3, 28, 2) == kMuxConstant && !k.f(3, 1, 1) && !k.f(2, 10, 1) &&
+                           k.f(2, 8, 2) == 0 && k.f(2, 6, 2) == 1 && k.f(2, 4, 2) == 2;
+            if (!(a_pos || b_pos) || !c_const) return -1;
+            uint32_t cr = k.f(1, 13, 8);
+            if (cr == kViewportScaleConstant || cr == kViewportOffsetConstant) return -1;
+            off = int(cr);
+        }
+        if (k.f(3, 0, 1)) break;
+    }
+    return x == 1 && y == 1 && z == 1 && w == 1 ? off : -1;
+}
+
+bool ReadsViewportOffset(const std::vector<uint32_t>& prog) {
+    for (size_t n = 0; n + 4 <= prog.size(); n += 4) {
+        if (ReadsConstant(Tok{&prog[n]}, kViewportOffsetConstant)) return true;
+        if (Tok{&prog[n]}.f(3, 0, 1)) break;
+    }
+    return ProjectionViewportOffset(prog) >= 0;
+}
+
 // clip z and w each from one dp4 or dph, z later only taken into the viewport: their w - z can be one dot
 bool SeparableClipDepth(const std::vector<uint32_t>& prog) {
     int z = 0, w = 0;
@@ -745,13 +783,50 @@ bool SeparableClipDepth(const std::vector<uint32_t>& prog) {
     return z == 1 && w == 1;
 }
 
-// at the dp4 or dph of clip z or w, the epilogue's copy of its vector and row
-std::string ClipSnapshot(const Tok& k, const std::string& a, const std::string& b) {
+// at the dp4 or dph of clip lanes, the epilogue's copy of its vector and row
+std::string ClipSnapshot(const Tok& k, const std::string& a, const std::string& b, bool xy) {
     PosLanes p = WrittenPosLanes(k);
     std::string v = k.f(1, 21, 4) == kMacDph ? "float4(" + a + ".xyz, 1)" : a;
+    if (xy && (p.dot & kLaneX)) return "        clip_xv = " + v + ";\n        clip_xr = " + b + ";\n";
+    if (xy && (p.dot & kLaneY)) return "        clip_yv = " + v + ";\n        clip_yr = " + b + ";\n";
     if (p.dot & kLaneZ) return "        clip_zv = " + v + ";\n        clip_zr = " + b + ";\n";
     if (p.dot & kLaneW) return "        clip_wv = " + v + ";\n        clip_wr = " + b + ";\n";
     return "";
+}
+
+std::string VsEpilogue(int pv_off) {
+    if (pv_off < 0) return kVsEpilogue;
+    std::string e = kVsEpilogue;
+    const char* p_anchor = "    precise float4 p = oPos;\n";
+    if (size_t at = e.find(p_anchor); at != std::string::npos) {
+        e.insert(at + std::strlen(p_anchor), "    p.xy -= 0.53125;\n");
+    }
+    const char* wz_block =
+        "    if (all(clip_zv == clip_wv)) {\n"
+        "        float scale = c[58].z * surf.z;\n"
+        "        wz = scale * dot(clip_wv, clip_wr - clip_zr) + q.w * (1 - scale - c[59].z * surf.z);\n"
+        "    }\n";
+    std::string pv_block = F(
+        "    if (surf.w == 0 && p.w == oPos.w && all(clip_xv == clip_wv) && all(clip_yv == clip_wv) && all(clip_zv == clip_wv)) {\n"
+        "        precise float2 inv_half = float2(2.0 / surf.x, 2.0 / surf.y);\n"
+        "        precise float2 bias = (c[%d].xy - 0.53125) * inv_half;\n"
+        "        precise float4 xr = clip_xr * inv_half.x - clip_wr;\n"
+        "        precise float4 yr = clip_wr - clip_yr * inv_half.y;\n"
+        "        precise float4 zr = clip_zr * surf.z;\n"
+        "        precise float4 wzr = clip_wr - zr;\n"
+        "        q.x = dot(clip_wv, xr) + (bias.x != 0 ? q.w * bias.x : 0);\n"
+        "        q.y = dot(clip_wv, yr) - (bias.y != 0 ? q.w * bias.y : 0);\n"
+        "        q.z = dot(clip_wv, zr) + (c[%d].z != 0 ? q.w * (c[%d].z * surf.z) : 0);\n"
+        "        wz = dot(clip_wv, wzr) - (c[%d].z != 0 ? q.w * (c[%d].z * surf.z) : 0);\n"
+        "        float2 sp = (float2(q.x, -q.y) / q.w + 1) * 0.5 * surf.xy;\n"
+        "        if (abs(sp.x - (surf.x - 0.5)) < 1e-3) q.x = q.w;\n"
+        "        if (abs(sp.y - (surf.y - 0.5)) < 1e-3) q.y = -q.w;\n"
+        "    }\n",
+        pv_off, pv_off, pv_off, pv_off);
+    if (size_t at = e.find(wz_block); at != std::string::npos) {
+        e.replace(at, std::strlen(wz_block), pv_block);
+    }
+    return e;
 }
 
 std::string VertexProgramHlsl(const std::vector<uint32_t>& prog, uint16_t regs, uint64_t decode) {
@@ -759,7 +834,8 @@ std::string VertexProgramHlsl(const std::vector<uint32_t>& prog, uint16_t regs, 
     s += kVsHelpers;
     s += VsInputs(regs, decode);
     s += kVsPrologue;
-    bool separable = SeparableClipDepth(prog);
+    int pv_off = ProjectionViewportOffset(prog);
+    bool separable = pv_off >= 0 || SeparableClipDepth(prog);
     for (size_t n = 0; n + 4 <= prog.size(); n += 4) {
         Tok k{&prog[n]};
         uint32_t mac = k.f(1, 21, 4), ilu = k.f(1, 25, 3);
@@ -767,7 +843,7 @@ std::string VertexProgramHlsl(const std::vector<uint32_t>& prog, uint16_t regs, 
             std::string a = Src(k, 0, regs), b = Src(k, 1, regs), c = Src(k, 2, regs);
             s += "    {\n";
             if (mac) s += "        precise float4 mr = " + MacExpr(mac, a, b, c) + ";\n";
-            if (separable) s += ClipSnapshot(k, a, b);
+            if (separable) s += ClipSnapshot(k, a, b, pv_off >= 0);
             if (ilu) s += "        precise float4 ir = " + IluExpr(ilu, c) + ";\n";
             uint32_t r = k.f(3, 20, 4), omask = k.f(3, 12, 4);
             if (mac == 13) {
@@ -794,7 +870,7 @@ std::string VertexProgramHlsl(const std::vector<uint32_t>& prog, uint16_t regs, 
         }
         if (k.f(3, 0, 1)) break;  // last instruction
     }
-    s += kVsEpilogue;
+    s += VsEpilogue(pv_off);
     return s;
 }
 
@@ -839,7 +915,8 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
         s += "    oPos = float4(rhw.xy, rhw.z / surf.z, w);\n";
     } else {
         s += "    float4 ip = float4(" + v(0, "float4(0,0,0,1)") + ".xyz, 1);\n";
-        s += "    precise float4 cp = mul(ip, wvp);\n";
+        s += "    precise float4 cp = float4(dot(ip, wvp._m00_m10_m20_m30), dot(ip, wvp._m01_m11_m21_m31), "
+             "dot(ip, wvp._m02_m12_m22_m32), dot(ip, wvp._m03_m13_m23_m33));\n";
         s += "    float3 vp = mul(ip, wv).xyz;\n";
         s += "    float3 vn = mul(float4(" + v(2, "float4(0,0,0,0)") + ".xyz, 0), wvn).xyz;\n";
         if (f.light & 8) s += "    vn = dot(vn, vn) > 0 ? normalize(vn) : vn;\n";
