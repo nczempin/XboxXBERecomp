@@ -2321,19 +2321,50 @@ constexpr size_t kTsWorld = 256;
 void FillTransformConstants(const State& s, GuestExtent size, DrawConstants& c) {
     uint32_t gw = size.w;
     uint32_t gh = size.h;
-    // world, view, projection, then the viewport inside the target
     float wv[16];
-    float wvp[16];
     MatMul(s.transforms[kTsWorld].data(), s.transforms[kTsView].data(), wv);
-    MatMul(wv, s.transforms[kTsProjection].data(), wvp);
     const auto& v = s.viewport;
-    float sx = float(v.w) / gw;
-    float sy = float(v.h) / gh;
-    float ox = (2.0f * v.x + v.w) / gw - 1;
-    float oy = 1 - (2.0f * v.y + v.h) / gh;
-    float vpm[16] = {sx, 0, 0, 0, 0, sy, 0, 0, 0, 0, v.max_z - v.min_z, 0, ox, oy, v.min_z, 1};
     float full[16];
-    MatMul(wvp, vpm, full);
+    if (s.rs[kRsZEnable] != kZUseW) {
+        // Match the XDK's Composite = WorldView * ProjectionViewport association and zscale rounding so multi-pass
+        // EQUAL depth tests agree bit for bit between fixed function and ProjectionViewport vertex programs.
+        const float* proj = s.transforms[kTsProjection].data();
+        float hw = v.w * 0.5f;
+        float hh = v.h * 0.5f;
+        float sz = (v.max_z - v.min_z) * s.zscale;
+        float oz = v.min_z * s.zscale;
+        float pvp[16];
+        for (int r = 0; r < 4; r++) {
+            const float* p = proj + r * 4;
+            pvp[r * 4 + 0] = p[0] * hw + p[3] * hw;
+            pvp[r * 4 + 1] = p[1] * -hh + p[3] * hh;
+            pvp[r * 4 + 2] = p[2] * sz + p[3] * oz;
+            pvp[r * 4 + 3] = p[3];
+        }
+        float comp[16];
+        MatMul(wv, pvp, comp);
+        float inv_hw = 2.0f / gw;
+        float inv_hh = 2.0f / gh;
+        float inv_zs = 1.0f / s.zscale;
+        float off_x = (float(v.x) + s.ss_offset_x) * inv_hw;
+        float off_y = (float(v.y) + s.ss_offset_y) * inv_hh;
+        for (int r = 0; r < 4; r++) {
+            float w = comp[r * 4 + 3];
+            full[r * 4 + 0] = (comp[r * 4 + 0] * inv_hw - w) + (off_x != 0 ? w * off_x : 0);
+            full[r * 4 + 1] = (w - comp[r * 4 + 1] * inv_hh) - (off_y != 0 ? w * off_y : 0);
+            full[r * 4 + 2] = comp[r * 4 + 2] * inv_zs;
+            full[r * 4 + 3] = w;
+        }
+    } else {
+        float wvp[16];
+        MatMul(wv, s.transforms[kTsProjection].data(), wvp);
+        float sx = float(v.w) / gw;
+        float sy = float(v.h) / gh;
+        float ox = (2.0f * (v.x + s.ss_offset_x) + v.w) / gw - 1;
+        float oy = 1 - (2.0f * (v.y + s.ss_offset_y) + v.h) / gh;
+        float vpm[16] = {sx, 0, 0, 0, 0, sy, 0, 0, 0, 0, v.max_z - v.min_z, 0, ox, oy, v.min_z, 1};
+        MatMul(wvp, vpm, full);
+    }
     Transpose(full, c.wvp);
     Transpose(wv, c.wv);
     // normals take the inverse transpose of the upper 3x3

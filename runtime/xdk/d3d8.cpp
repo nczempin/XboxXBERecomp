@@ -238,6 +238,38 @@ float ZScale(const gpu::Surface& zs) {
 
 bool g_own_constants = false;  // D3DSCM_NORESERVEDCONSTANTS: c-38 and c-37 are the title's
 
+// Projection * viewport transform, mirrored to CDevice for recompiled or inlined GetProjectionViewportMatrix
+void UpdateProjectionViewport() {
+    if (XDK_CDevice_ProjectionViewport == xdk::kUnknown) return;
+    const auto& v = g_state.viewport;
+    const float* proj = g_state.transforms[3].data();
+    float sx = v.w * 0.5f, ox = sx;
+    float sy = v.h * -0.5f, oy = -sy;
+    float sz = (v.max_z - v.min_z) * g_state.zscale, oz = v.min_z * g_state.zscale;
+    float sw = 1.0f;
+    if (g_state.rs[gpu::kRsZEnable] == 2) {  // D3DZB_USEW
+        float m22 = proj[10], m23 = proj[11], m32 = proj[14], m33 = proj[15];
+        float z_far = (m22 != m23 && m22 != 0.0f) ? ((m33 - m32) / (m22 - m23)) * m23 + m33 : 1.0f;
+        float wscale = z_far != 0.0f ? g_state.zscale / z_far : g_state.zscale;
+        sx *= wscale;
+        sy *= wscale;
+        sz *= wscale;
+        sw = wscale;
+        ox *= wscale;
+        oy *= wscale;
+        oz *= wscale;
+    }
+    float out[16];
+    for (int r = 0; r < 4; r++) {
+        const float* p = proj + r * 4;
+        out[r * 4 + 0] = p[0] * sx + p[3] * ox;
+        out[r * 4 + 1] = p[1] * sy + p[3] * oy;
+        out[r * 4 + 2] = p[2] * sz + p[3] * oz;
+        out[r * 4 + 3] = p[3] * sw;
+    }
+    std::memcpy(HostPtr(kDevice + XDK_CDevice_ProjectionViewport), out, sizeof(out));
+}
+
 // c-38 and c-37 hold the viewport scale and offset, as D3D_GetViewportOffsetAndScale computes them
 void UpdateViewportConstants() {
     auto& v = g_state.viewport;
@@ -257,11 +289,13 @@ void UpdateViewportConstants() {
         std::memcpy(HostPtr(p + 16), &v.min_z, 4);
         std::memcpy(HostPtr(p + 20), &v.max_z, 4);
     }
+    UpdateProjectionViewport();
 }
 
 void SetComplex(uint32_t rs, uint32_t v) {
     g_state.rs[rs] = v;
     W32(kRenderState + rs * 4, v);
+    if (rs == gpu::kRsZEnable) UpdateProjectionViewport();
 }
 
 // The library's default render and texture stage states; its pushes land in the scratch buffer
@@ -393,6 +427,11 @@ HLE_STDCALL(Direct3D_CreateDevice, 6) {
         for (uint32_t i = 0; i < 256; i++) ramp[i] = ramp[256 + i] = ramp[512 + i] = uint8_t(i);
     }
     if (HAS(D3D_FvfShader) && XDK_CDevice_VertexShader != xdk::kUnknown) SetDev(XDK_CDevice_VertexShader, SYM(D3D_FvfShader));
+    if (XDK_CDevice_ScreenSpaceOffset != xdk::kUnknown) {
+        float half_bias = 0.53125f;
+        std::memcpy(HostPtr(kDevice + XDK_CDevice_ScreenSpaceOffset), &half_bias, 4);
+        std::memcpy(HostPtr(kDevice + XDK_CDevice_ScreenSpaceOffset + 4), &half_bias, 4);
+    }
     if (kVBlank) {
         // notification event, signalled
         SetDev(XDK_CDevice_VBlankEvent, 0x00040000);
@@ -709,6 +748,11 @@ HLE_STDCALL(D3DDevice_SetScissors, 3) {
 HLE_STDCALL(D3DDevice_SetScreenSpaceOffset, 2) {
     g_state.ss_offset_x = ArgF(a, 0);
     g_state.ss_offset_y = ArgF(a, 1);
+    if (XDK_CDevice_ScreenSpaceOffset != xdk::kUnknown) {
+        float sx = g_state.ss_offset_x + 0.53125f, sy = g_state.ss_offset_y + 0.53125f;
+        std::memcpy(HostPtr(kDevice + XDK_CDevice_ScreenSpaceOffset), &sx, 4);
+        std::memcpy(HostPtr(kDevice + XDK_CDevice_ScreenSpaceOffset + 4), &sy, 4);
+    }
     UpdateViewportConstants();
     return 0;
 }
@@ -802,6 +846,7 @@ HLE_STDCALL(D3DDevice_SetTransform, 2) {
     std::memcpy(HostPtr(kDevice + kDevTransforms + t * 64), HostPtr(a[1]), 64);
     uint32_t pc = t < 2 ? t + 2 : t < 6 ? t + 14 : t + 250;
     std::memcpy(g_state.transforms[pc].data(), HostPtr(a[1]), 64);
+    if (t == 1) UpdateProjectionViewport();
     return 0;
 }
 
@@ -957,6 +1002,7 @@ HLE_STDCALL(D3DDevice_GetVertexShaderFunction, 3) {
 HLE_STDCALL(D3DDevice_SetVertexShader, 1) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     uint32_t h = a[0];
+    if (XDK_CDevice_VertexShader != xdk::kUnknown) SetDev(XDK_CDevice_VertexShader + 4, h);
     g_state.vs_handle = h;
     g_state.vs = nullptr;
     if (h & 1) {
@@ -1123,7 +1169,10 @@ HLE_STDCALL(D3DDevice_SelectVertexShader, 2) {
         return 0;
     }
     g_state.vs = SelectedShader(handle, a[1]);
-    if (handle) g_state.vs_handle = handle;
+    if (handle) {
+        g_state.vs_handle = handle;
+        if (XDK_CDevice_VertexShader != xdk::kUnknown) SetDev(XDK_CDevice_VertexShader + 4, handle);
+    }
     return 0;
 }
 HLE_STDCALL(D3DDevice_SetShaderConstantMode, 1) {
@@ -1152,6 +1201,7 @@ HLE_STDCALL(D3DDevice_DeletePixelShader, 1) {
 
 HLE_STDCALL(D3DDevice_SetPixelShader, 1) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    if (XDK_CDevice_PixelShader != xdk::kUnknown) SetDev(XDK_CDevice_PixelShader, a[0]);
     g_state.ps = nullptr;
     if (!a[0]) return 0;
     auto it = g_ps.find(a[0]);
@@ -1411,7 +1461,7 @@ void Walk(uint32_t end) {
             uint32_t m = head & 0x40000000 ? method : method + i * 4;
             uint32_t v = R32(p);
             ApplyVisibilityMethod(m, v);
-            if (!ApplyConstant(m, v)) ApplyImmediate(m, v);
+            if (!ApplyConstant(m, v) && !ApplyImmediate(m, v) && (m == 0x394 || m == 0x398)) SetSimple(m, v);
         }
     }
     g_walk = end;
