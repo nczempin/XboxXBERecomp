@@ -72,6 +72,7 @@ struct File : Object {
     FILE* fp = nullptr;
     const Disc::Entry* entry = nullptr;  // on the disc image instead of a host path
     bool dir = false;
+    bool writable = false;
     uint64_t pos = 0;
     std::vector<fs::directory_entry> entries;
     std::vector<const Disc::Entry*> disc_entries;
@@ -322,9 +323,11 @@ bool ReadGameFile(const std::string& xbox_path, std::vector<uint8_t>& out) {
 
 // exports
 
+constexpr uint32_t kWriteAccess = 0x40000000u | 0x10000000u | 0x00000002u | 0x00000004u;  // GENERIC_WRITE/ALL, FILE_WRITE_DATA/APPEND_DATA
+
 KERNEL_EXPORT(190, NtCreateFile, 9) {
     uint32_t handle_out = a[0], access = a[1], attrs = a[2], iosb = a[3], disposition = a[7], options = a[8];
-    (void)access;
+    bool writable = (access & kWriteAccess) != 0;
     uint32_t root;
     std::string name = ObjectName(attrs, &root);
     Target t = Resolve(name, root);
@@ -378,7 +381,7 @@ KERNEL_EXPORT(190, NtCreateFile, 9) {
                 IoStatus(iosb, kObjectNameNotFound, 5);
                 return kObjectNameNotFound;
             }
-            mode = "r+b";
+            mode = writable ? "r+b" : "rb";
             break;
         case 2:  // create
             if (exists) {
@@ -419,6 +422,7 @@ KERNEL_EXPORT(190, NtCreateFile, 9) {
     f->host = host;
     f->xbox = Normalize(name);
     f->fp = fp;
+    f->writable = writable;
     f->delete_on_close = options & 0x1000;  // FILE_DELETE_ON_CLOSE
     W32(handle_out, NewHandle(f));
     IoStatus(iosb, kSuccess, info);
@@ -428,7 +432,8 @@ KERNEL_EXPORT(190, NtCreateFile, 9) {
 
 KERNEL_EXPORT(202, NtOpenFile, 6) {
     // same as create with FILE_OPEN
-    uint32_t handle_out = a[0], attrs = a[2], iosb = a[3], options = a[5];
+    uint32_t handle_out = a[0], access = a[1], attrs = a[2], iosb = a[3], options = a[5];
+    bool writable = (access & kWriteAccess) != 0;
     uint32_t root;
     std::string name = ObjectName(attrs, &root);
     Target t = Resolve(name, root);
@@ -444,9 +449,10 @@ KERNEL_EXPORT(202, NtOpenFile, 6) {
     f->host = host;
     f->xbox = Normalize(name);
     f->dir = fs::is_directory(host, ec);
+    f->writable = writable;
     if (!f->dir) {
-        f->fp = std::fopen(host.c_str(), "r+b");
-        if (!f->fp) f->fp = std::fopen(host.c_str(), "rb");
+        f->fp = std::fopen(host.c_str(), writable ? "r+b" : "rb");
+        if (!f->fp && writable) f->fp = std::fopen(host.c_str(), "rb");
         if (!f->fp) return kAccessDenied;
     }
     (void)options;
@@ -474,7 +480,7 @@ static uint32_t Transfer(const Args& a, bool write, uint32_t pages) {
     uint32_t h = a[0], event = a[1], apc = a[2], apc_ctx = a[3], iosb = a[4], buf = a[5], len = a[6], off = a[7];
     auto f = FileFromHandle(h);
     if (!f || (!f->fp && !f->entry)) return kInvalidHandle;
-    if (write && f->entry) return kAccessDenied;
+    if (write && (f->entry || !f->writable)) return kAccessDenied;
     ResetEvent(*f);
     std::lock_guard<std::mutex> lock(f->io);
     uint64_t pos = Offset(*f, off);
@@ -558,6 +564,7 @@ KERNEL_EXPORT(226, NtSetInformationFile, 5) {
             break;
         case 19:  // allocation: only a size below the end of file cuts it
         case 20:  // end of file
+            if (!f->writable) return kAccessDenied;
             if (f->fp) {
                 std::lock_guard<std::mutex> lock(f->io);
                 std::fflush(f->fp);
