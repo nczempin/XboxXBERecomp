@@ -23,6 +23,7 @@ CDevice_Time              = 0x30   # D3D_SetFence 0x1F3BAD reads it, 0x1F3C23 ad
 CDevice_PixelShader       = 0x370  # D3DDevice_SetPixelShader 0x1F31E8 stores the handle
 CDevice_VertexShader      = 0x380  # D3DDevice_SetVertexShader 0x1F2B88 stores the current shader object
 CDevice_BackBufferScale   = 0x528  # CDevice_InitializeFrameBuffers 0x1F59BA stores X scale, 0x1F59D3 Y scale at +4
+CDevice_ProjectionViewport = 0x530 # D3D_UpdateProjectionViewportTransform 0x1ED6D5 writes 16 dwords, GetProjectionViewportMatrix 0x1EF08C reads them
 CDevice_Viewport          = 0xA90  # D3DDevice_GetViewportOffsetAndScale 0x1ED485..0x1ED54F reads X, Y, Width, Height, MinZ, MaxZ
 CDevice_ScreenSpaceOffset = 0xAA8  # D3DDevice_SetScreenSpaceOffset 0x1F01C3 stores X, 0x1F01D3 Y at +4
 CDevice_AutoDepth         = 0x21CC # CDevice_InitializeFrameBuffers 0x1F5A79 stores the auto depth buffer
