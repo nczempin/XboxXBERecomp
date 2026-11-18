@@ -145,7 +145,35 @@ float4 psmain(O i) : SV_Target {
 constexpr DXGI_FORMAT kDepthTypeless = DXGI_FORMAT_R32G8X24_TYPELESS;
 constexpr DXGI_FORMAT kDepthFormat = DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
 constexpr DXGI_FORMAT kDepthRead = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+constexpr DXGI_FORMAT kStencilRead = DXGI_FORMAT_X32_TYPELESS_G8X24_UINT;
 constexpr float kDepthFar = 0;
+
+const char* kDepthColorHlsl = R"(
+cbuffer B : register(b1) { float4 p0; float4 p1; };
+Texture2D<float> dep : register(t0);
+Texture2D<uint2> sten : register(t1);
+float4 vs(uint id : SV_VertexID) : SV_Position {
+    float2 t = float2((id << 1) & 2, id & 2);
+    return float4(t * float2(2, -2) + float2(-1, 1), 0, 1);
+}
+float4 psmain(float4 pos : SV_Position) : SV_Target {
+    int3 xy = int3(int2(pos.xy), 0);
+    float d = saturate(dep.Load(xy));
+    float zn = p0.z > 0 ? saturate(p0.z / (d + p0.z)) : (1.0 - d);
+    uint z24 = (uint)round(zn * p0.y);
+    uint s8 = sten.Load(xy).y & 255u;
+    float b0 = s8 / 255.0;
+    float b1 = (z24 & 255u) / 255.0;
+    float b2 = ((z24 >> 8) & 255u) / 255.0;
+    float b3 = ((z24 >> 16) & 255u) / 255.0;
+    int m = (int)round(p0.x);
+    if (m == 1) return float4(b2, b1, b0, 1.0);
+    if (m == 2) return float4(b0, b1, b2, b3);
+    if (m == 3) return float4(b1, b2, b3, b0);
+    if (m == 4) return float4(b3, b2, b1, b0);
+    return float4(b2, b1, b0, b3);
+}
+)";
 
 const char* kDepthHlsl = R"(
 Texture2D<float> img : register(t0);
@@ -550,6 +578,8 @@ private:
     ID3D12Resource* BindTexture(const State& s, int stage, DrawTextures& stages);
     ID3D12Resource* BindTargetTexture(const State& s, int stage, const TextureDesc& d, Target& t, bool box,
                                       DrawTextures& stages);
+    ID3D12Resource* BindDepthAsColor(const State& s, int stage, const TextureDesc& d, Target& t, bool box,
+                                     DrawTextures& stages);
     ID3D12Resource* BindGuestTexture(const State& s, int stage, const TextureDesc& d, const FormatInfo& fi,
                                      DrawTextures& stages);
     bool CreateTexture(Tex& tx, const TextureDesc& d, const FormatInfo& fi, uint64_t key);
@@ -731,6 +761,7 @@ private:
     std::unordered_map<uint64_t, uint32_t> samplers_;
     uint32_t smp_used_ = 0;
     std::unordered_map<uint64_t, Target> targets_;
+    uint64_t target_seq_ = 0;  // bumped on each GPU target write
     std::unordered_map<uint32_t, uint64_t> target_used_;  // target address to the frame it was last used
     std::array<UsedTarget, 4> recent_used_{};
     uint32_t recent_used_next_ = 0;
@@ -738,6 +769,16 @@ private:
     std::unordered_map<uint64_t, Tex> textures_;  // by data address, a P8 texture's with its palette's above
     std::unordered_map<uint64_t, Tex> pack_textures_;  // texture pack images by key, kept for the run
     std::unordered_map<uint64_t, ComPtr<ID3D12PipelineState>> blit_psos_;
+    struct DepthColor {
+        ComPtr<ID3D12Resource> res;
+        D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        uint32_t view = 0;
+        uint32_t w = 0;
+        uint32_t h = 0;
+        uint64_t seq = 0;
+        float w_scale = 0;
+    };
+    std::unordered_map<uint64_t, DepthColor> depth_colors_;
     Extension* ext_ = nullptr;
     // one frame capture: every draw in a text file, each target as the frame leaves it, the textures it read
     FILE* cap_ = nullptr;
@@ -1075,6 +1116,18 @@ void D3D12Backend::Transition(ID3D12Resource* r, D3D12_RESOURCE_STATES& cur, D3D
 // a resized target gives back its view and its resources
 void D3D12Backend::ReleaseTarget(std::unordered_map<uint64_t, Target>::iterator it) {
     if (bound_rt_ == &it->second || bound_ds_ == &it->second) bound_rt_ = bound_ds_ = nullptr;
+    if (it->second.depth) {
+        for (uint64_t m = 0; m < 8; m++) {
+            auto dc = depth_colors_.find(uint64_t(it->second.data) << 3 | m);
+            if (dc != depth_colors_.end()) {
+                if (dc->second.res) {
+                    free_rtv_.push_back(dc->second.view);
+                    CurrentFrame().garbage.push_back(dc->second.res);
+                }
+                depth_colors_.erase(dc);
+            }
+        }
+    }
     (it->second.depth ? free_dsv_ : free_rtv_).push_back(it->second.view);
     CurrentFrame().garbage.push_back(it->second.res);
     if (it->second.fb) CurrentFrame().garbage.push_back(it->second.fb);
@@ -1207,10 +1260,12 @@ bool D3D12Backend::BindTargets(const State& s) {
         if (LatchCpuWrite(*rt)) UploadTarget(*rt, s.rt);
         Transition(rt->res.Get(), rt->state, D3D12_RESOURCE_STATE_RENDER_TARGET);
         rt->drawn = true;
+        rt->write_seq = ++target_seq_;
     }
     if (ds) {
         Transition(ds->res.Get(), ds->state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
         ds->drawn = true;
+        if (s.simple[kMZWriteEnable >> 2] || s.rs[kRsStencilEnable]) ds->write_seq = ++target_seq_;
     }
     if (rt != bound_rt_ || ds != bound_ds_) {
         D3D12_CPU_DESCRIPTOR_HANDLE rh = rt ? Cpu(rtv_heap_.Get(), rt->view, rtv_inc_) : D3D12_CPU_DESCRIPTOR_HANDLE{};
@@ -1268,6 +1323,8 @@ void D3D12Backend::DrawDepthCopy(Target& src, Target& dst, ID3D12PipelineState* 
     Alloc cb = Upload(256, 256);
     DrawFullScreen(pso, cb.gpu, slot);
     dst.drawn = true;
+    dst.w_scale = src.w_scale;
+    dst.write_seq = ++target_seq_;
     bound_rt_ = bound_ds_ = nullptr;
 }
 
@@ -1356,6 +1413,7 @@ void D3D12Backend::UploadTarget(Target& t, const Surface& s) {
     CurrentFrame().garbage.push_back(tex);
     t.epoch = DirtyEpoch(t.data);
     t.sig = MemSig(t.data, t.bytes);
+    t.write_seq = ++target_seq_;
 }
 
 // samplers_ key of the full screen passes' samplers, apart from the stage samplers' hashed keys
@@ -1518,6 +1576,7 @@ void D3D12Backend::Pass(const char* hlsl, const char* entry, DXGI_FORMAT rtv, D3
         sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         sv.Texture2D.MipLevels = 1;
+        if (sv.Format == kStencilRead) sv.Texture2D.PlaneSlice = 1;
         dev_->CreateShaderResourceView(i < 3 ? src[i] : nullptr, &sv, Cpu(srv_heap_.Get(), slot + i, srv_inc_));
     }
     Alloc cb = Upload(256, 256);
@@ -1722,6 +1781,73 @@ ID3D12Resource* D3D12Backend::BindTargetTexture(const State& s, int stage, const
     if (t.depth) info.shadow = ShadowDepthKind(d.format);
     info.kind = kTex2D;
     return t.res.Get();
+}
+
+int DepthColorMode(uint32_t fmt) {
+    switch (fmt) {
+        case 0x06: case 0x12: return 0;
+        case 0x07: case 0x1E: return 1;
+        case 0x3A: case 0x3F: return 2;
+        case 0x3B: case 0x40: return 3;
+        case 0x3C: case 0x41: return 4;
+        default: return -1;
+    }
+}
+
+// a 24 bit depth and 8 bit stencil target read through a 32 bit colour texture header: packed to BGRA on the GPU
+ID3D12Resource* D3D12Backend::BindDepthAsColor(const State& s, int stage, const TextureDesc& d, Target& t, bool box,
+                                               DrawTextures& stages) {
+    int mode = DepthColorMode(d.format);
+    if (mode < 0 || !t.drawn) return nullptr;
+    uint64_t key = uint64_t(t.data) << 3 | uint64_t(mode);
+    DepthColor& dc = depth_colors_[key];
+    if (!dc.res || dc.w != t.w || dc.h != t.h) {
+        if (dc.res) {
+            free_rtv_.push_back(dc.view);
+            CurrentFrame().garbage.push_back(dc.res);
+            dc = {};
+        }
+        if (free_rtv_.empty()) return nullptr;
+        D3D12_HEAP_PROPERTIES hp{D3D12_HEAP_TYPE_DEFAULT};
+        D3D12_RESOURCE_DESC td = Texture2DDesc(kBgra, t.w, t.h);
+        td.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        D3D12_CLEAR_VALUE cv{};
+        cv.Format = kBgra;
+        if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                                 &cv, IID_PPV_ARGS(&dc.res)))) {
+            return nullptr;
+        }
+        dc.view = free_rtv_.back();
+        free_rtv_.pop_back();
+        dc.w = t.w;
+        dc.h = t.h;
+        dc.state = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        dev_->CreateRenderTargetView(dc.res.Get(), nullptr, Cpu(rtv_heap_.Get(), dc.view, rtv_inc_));
+    }
+    if (!t.write_seq || dc.seq != t.write_seq || dc.w_scale != t.w_scale) {
+        Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        Transition(dc.res.Get(), dc.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        ID3D12Resource* const src[3] = {t.res.Get(), t.res.Get(), nullptr};
+        const DXGI_FORMAT fmt[3] = {kDepthRead, kStencilRead, kBgra};
+        const float p[8] = {float(mode), 16777215.0f, t.w_scale, 0, 0, 0, 0, 0};
+        Pass(kDepthColorHlsl, "psmain", kBgra, Cpu(rtv_heap_.Get(), dc.view, rtv_inc_), dc.w, dc.h, src, fmt, p, -1.0f);
+        dc.seq = t.write_seq;
+        dc.w_scale = t.w_scale;
+    }
+    Transition(dc.res.Get(), dc.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+    TexInfo& info = stages.info[stage];
+    stages.rt[stage] = true;
+    info.flags |= kTexTarget;
+    info.kind = kTex2D;
+    Target* rt = FindTarget(s.rt, false);
+    float k = float(t.w) / (t.gw * stages.k[stage]);
+    if (box && k > kUpscaledMin && rt && (t.gw > rt->gw || t.gh > rt->gh)) {
+        stages.wide[stage] = k;
+        info.flags |= kTexWide;
+    }
+    stages.sv[stage].Format = kBgra;
+    return dc.res.Get();
 }
 
 bool SameTexture(const Tex& tx, const TextureDesc& d) {
@@ -1962,6 +2088,13 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
     bool box = true;
     if (ext_) ext_->Sample(d.data, fi.depth, stage, alt, stages.k[stage], box);
     auto tit = targets_.find(SizedTargetKey(d.data, fi.depth, d.width, d.height) | alt);
+    if (!fi.depth && fi.bits == 32 && !d.cube && d.depth == 1 && !fi.compressed) {
+        auto dit = targets_.find(SizedTargetKey(d.data, true, d.width, d.height));
+        if (dit != targets_.end() && dit->second.bytes >= d.width * d.height * 4 &&
+            (tit == targets_.end() || dit->second.write_seq > tit->second.write_seq)) {
+            if (ID3D12Resource* r = BindDepthAsColor(s, stage, d, dit->second, box, stages)) return r;
+        }
+    }
     if (tit != targets_.end() && !d.cube && d.depth == 1 && !fi.compressed) {
         return BindTargetTexture(s, stage, d, tit->second, box, stages);
     }
@@ -2324,46 +2457,47 @@ void FillTransformConstants(const State& s, GuestExtent size, DrawConstants& c) 
     float wv[16];
     MatMul(s.transforms[kTsWorld].data(), s.transforms[kTsView].data(), wv);
     const auto& v = s.viewport;
+    // Match the XDK's Composite = WorldView * ProjectionViewport association and zscale/wscale rounding so multi-pass
+    // EQUAL depth tests agree bit for bit between fixed function and ProjectionViewport vertex programs.
+    const float* proj = s.transforms[kTsProjection].data();
+    float sx = v.w * 0.5f, ox = sx;
+    float sy = v.h * -0.5f, oy = -sy;
+    float sz = (v.max_z - v.min_z) * s.zscale, oz = v.min_z * s.zscale;
+    float sw = 1.0f;
+    if (s.rs[kRsZEnable] == kZUseW) {
+        float m22 = proj[10], m23 = proj[11], m32 = proj[14], m33 = proj[15];
+        float z_far = (m22 != m23 && m22 != 0.0f) ? ((m33 - m32) / (m22 - m23)) * m23 + m33 : 1.0f;
+        float wscale = z_far != 0.0f ? s.zscale / z_far : s.zscale;
+        sx *= wscale;
+        sy *= wscale;
+        sz *= wscale;
+        sw = wscale;
+        ox *= wscale;
+        oy *= wscale;
+        oz *= wscale;
+    }
+    float pvp[16];
+    for (int r = 0; r < 4; r++) {
+        const float* p = proj + r * 4;
+        pvp[r * 4 + 0] = p[0] * sx + p[3] * ox;
+        pvp[r * 4 + 1] = p[1] * sy + p[3] * oy;
+        pvp[r * 4 + 2] = p[2] * sz + p[3] * oz;
+        pvp[r * 4 + 3] = p[3] * sw;
+    }
+    float comp[16];
+    MatMul(wv, pvp, comp);
+    float inv_hw = 2.0f / gw;
+    float inv_hh = 2.0f / gh;
+    float inv_zs = 1.0f / (s.zscale * sw);
+    float off_x = (float(v.x) + s.ss_offset_x) * inv_hw;
+    float off_y = (float(v.y) + s.ss_offset_y) * inv_hh;
     float full[16];
-    if (s.rs[kRsZEnable] != kZUseW) {
-        // Match the XDK's Composite = WorldView * ProjectionViewport association and zscale rounding so multi-pass
-        // EQUAL depth tests agree bit for bit between fixed function and ProjectionViewport vertex programs.
-        const float* proj = s.transforms[kTsProjection].data();
-        float hw = v.w * 0.5f;
-        float hh = v.h * 0.5f;
-        float sz = (v.max_z - v.min_z) * s.zscale;
-        float oz = v.min_z * s.zscale;
-        float pvp[16];
-        for (int r = 0; r < 4; r++) {
-            const float* p = proj + r * 4;
-            pvp[r * 4 + 0] = p[0] * hw + p[3] * hw;
-            pvp[r * 4 + 1] = p[1] * -hh + p[3] * hh;
-            pvp[r * 4 + 2] = p[2] * sz + p[3] * oz;
-            pvp[r * 4 + 3] = p[3];
-        }
-        float comp[16];
-        MatMul(wv, pvp, comp);
-        float inv_hw = 2.0f / gw;
-        float inv_hh = 2.0f / gh;
-        float inv_zs = 1.0f / s.zscale;
-        float off_x = (float(v.x) + s.ss_offset_x) * inv_hw;
-        float off_y = (float(v.y) + s.ss_offset_y) * inv_hh;
-        for (int r = 0; r < 4; r++) {
-            float w = comp[r * 4 + 3];
-            full[r * 4 + 0] = (comp[r * 4 + 0] * inv_hw - w) + (off_x != 0 ? w * off_x : 0);
-            full[r * 4 + 1] = (w - comp[r * 4 + 1] * inv_hh) - (off_y != 0 ? w * off_y : 0);
-            full[r * 4 + 2] = comp[r * 4 + 2] * inv_zs;
-            full[r * 4 + 3] = w;
-        }
-    } else {
-        float wvp[16];
-        MatMul(wv, s.transforms[kTsProjection].data(), wvp);
-        float sx = float(v.w) / gw;
-        float sy = float(v.h) / gh;
-        float ox = (2.0f * (v.x + s.ss_offset_x) + v.w) / gw - 1;
-        float oy = 1 - (2.0f * (v.y + s.ss_offset_y) + v.h) / gh;
-        float vpm[16] = {sx, 0, 0, 0, 0, sy, 0, 0, 0, 0, v.max_z - v.min_z, 0, ox, oy, v.min_z, 1};
-        MatMul(wvp, vpm, full);
+    for (int r = 0; r < 4; r++) {
+        float w = comp[r * 4 + 3];
+        full[r * 4 + 0] = (comp[r * 4 + 0] * inv_hw - w) + (off_x != 0 ? w * off_x : 0);
+        full[r * 4 + 1] = (w - comp[r * 4 + 1] * inv_hh) - (off_y != 0 ? w * off_y : 0);
+        full[r * 4 + 2] = comp[r * 4 + 2] * inv_zs;
+        full[r * 4 + 3] = w;
     }
     Transpose(full, c.wvp);
     Transpose(wv, c.wv);
@@ -2446,14 +2580,22 @@ constexpr uint32_t kMClipMin = 0x394;
 constexpr uint32_t kMClipMax = 0x398;
 constexpr float kFallbackNear = 1.0f / 65536;  // of the far w, when no range is known
 
-// Fixed function clip w is the host's view depth over the projection's range; a program's is in buffer units up to
-// zscale, its near end the clip minimum the title sent
-WRange DrawWRange(const State& s, bool program) {
+// Pretransformed clip w is 1 / rhw over the projection's range; transformed fixed function and vertex programs both
+// scale clip w into buffer units up to zscale, with the near end from SetDepthClipPlanes or the scaled projection
+WRange DrawWRange(const State& s, bool buffer_w) {
     WRange r{0, s.zscale};
-    if (!program) {
+    if (!buffer_w) {
         r = ProjectionWRange(s.transforms[kTsProjection].data());
-    } else if (SimpleState(s, kMClipMax)) {
-        r.near_w = Bits(SimpleState(s, kMClipMin));
+    } else {
+        if (SimpleState(s, kMClipMax)) {
+            r.near_w = Bits(SimpleState(s, kMClipMin));
+            r.far_w = Bits(SimpleState(s, kMClipMax));
+        }
+        if (r.near_w <= 0 || r.near_w >= r.far_w) {
+            r = {0, s.zscale};
+            WRange pr = ProjectionWRange(s.transforms[kTsProjection].data());
+            if (pr.near_w > 0 && pr.near_w < pr.far_w) r.near_w = pr.near_w * (s.zscale / pr.far_w);
+        }
     }
     if (r.near_w <= 0 || r.near_w >= r.far_w) r.near_w = r.far_w * kFallbackNear;
     return r;
@@ -2468,10 +2610,16 @@ void D3D12Backend::FillDepthConstants(const State& s, const DrawShaders& sh, con
         c.zparams[2] = units / s.zscale;
         return;
     }
-    WRange r = DrawWRange(s, sh.prog);
+    bool buffer_w = sh.prog || sh.fixed_transform;
+    WRange r = DrawWRange(s, buffer_w);
     c.zparams[0] = r.near_w / (r.far_w - r.near_w);
     c.zparams[1] = r.far_w;
-    c.zparams[2] = sh.prog ? units : units * r.far_w / s.zscale;
+    c.zparams[2] = buffer_w ? units : units * r.far_w / s.zscale;
+    if (bound_ds_ && k.zen && k.zwrite &&
+        (!bound_ds_->w_scale || (s.viewport.w >= bound_ds_->gw && s.viewport.h >= bound_ds_->gh))) {
+        WRange br = buffer_w ? r : DrawWRange(s, true);
+        bound_ds_->w_scale = br.near_w / (br.far_w - br.near_w);
+    }
 }
 
 // a fresh copy of the draw's vertex constants, kept as the last upload
@@ -2933,6 +3081,10 @@ void D3D12Backend::ClearTarget(Target& t, const State& s, const ClearArgs& c, st
         rs.push_back(ScaledRect(t, int(v.x), int(v.y), int(v.x + v.w), int(v.y + v.h)));
     }
     if (t.depth) {
+        if ((c.flags & kClearZ) && rs.size() == 1 && rs[0].left <= 0 && rs[0].top <= 0 &&
+            rs[0].right >= LONG(t.w) && rs[0].bottom >= LONG(t.h)) {
+            t.w_scale = 0;
+        }
         Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
         D3D12_CLEAR_FLAGS cf = D3D12_CLEAR_FLAGS(((c.flags & kClearZ) ? D3D12_CLEAR_FLAG_DEPTH : 0) |
                                                  ((c.flags & kClearStencil) ? D3D12_CLEAR_FLAG_STENCIL : 0));
@@ -2955,6 +3107,7 @@ void D3D12Backend::ClearTarget(Target& t, const State& s, const ClearArgs& c, st
         }
     }
     t.drawn = true;
+    t.write_seq = ++target_seq_;
 }
 
 // ClearChannels' pipeline for the target format and channel mask, kept in blit_psos_; null when it can't be made
@@ -3118,6 +3271,7 @@ void D3D12Backend::CopyByDraw(const Target& src_t, ID3D12Resource* src_res, D3D1
         Blit(src_res, src_t.fmt, uv, o);
     }
     dst_t.drawn = true;
+    dst_t.write_seq = ++target_seq_;
     bound_rt_ = bound_ds_ = nullptr;
 }
 
@@ -3155,6 +3309,7 @@ void D3D12Backend::CopyByRegion(const Target& src_t, ID3D12Resource* src_res, D3
         cl_->CopyTextureRegion(&dl, dx, dy, 0, &sl, &b);
     }
     dst_t.drawn = true;
+    dst_t.write_seq = ++target_seq_;
     bound_rt_ = bound_ds_ = nullptr;
 }
 
