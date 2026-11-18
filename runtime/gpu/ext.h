@@ -35,6 +35,8 @@ struct Target {
     D3D12_RESOURCE_STATES fb_state = D3D12_RESOURCE_STATE_COPY_DEST;
     DXGI_FORMAT fmt = DXGI_FORMAT_B8G8R8A8_UNORM;
     float range = 1;         // colour held divided by it until the extension resolves the target
+    float w_scale = 0;       // near_w / (far_w - near_w) when last written as a w buffer, 0 for a z buffer
+    uint64_t write_seq = 0;  // renderer write counter, disambiguating colour and depth targets at one address
     uint64_t tag = ~0ull;    // the extension's
 };
 

@@ -384,6 +384,7 @@ std::string DotInput(uint32_t map, uint32_t src) {
         case 1: return F("sbyte(t%u.rgb, 128, 128, 127)", src);        // offset by 128
         case 2: return F("sbyte(t%u.rgb, -0.5, 255.5, 127.5)", src);  // two's complement, (2b + 1) / 255
         case 3: return F("sbyte(t%u.rgb, 0, 256, 127)", src);         // two's complement
+        case 4: return F("hilo1(t%u)", src);                           // unsigned 16-bit AR and GB over 65535, z = 1
         default: return F("t%u.rgb", src);
     }
 }
@@ -478,6 +479,10 @@ std::string TexFetch(const PixelKey& k, int i) {
 const char* kPsSbyte = R"(
 // unorm to byte b, less lo under 128 or hi from 128, over d
 float3 sbyte(float3 u, float lo, float hi, float d) { float3 b = u * 255; return (b - (b >= 128 ? hi : lo)) / d; }
+float3 hilo1(float4 u) {
+    uint4 b = (uint4)round(saturate(u) * 255.0);
+    return float3(((b.a << 8) | b.r) / 65535.0, ((b.g << 8) | b.b) / 65535.0, 1.0);
+}
 )";
 const char* kPsTail = R"(float4 spreadtap(Texture2D t, SamplerState s, float2 uv, float4 w, float m) {
     float4 c = 0;
@@ -822,7 +827,7 @@ std::string VsEpilogue(int pv_off) {
         "        if (abs(sp.x - (surf.x - 0.5)) < 1e-3) q.x = q.w;\n"
         "        if (abs(sp.y - (surf.y - 0.5)) < 1e-3) q.y = -q.w;\n"
         "    }\n",
-        pv_off, pv_off, pv_off, pv_off);
+        pv_off, pv_off, pv_off, pv_off, pv_off);
     if (size_t at = e.find(wz_block); at != std::string::npos) {
         e.replace(at, std::strlen(wz_block), pv_block);
     }
