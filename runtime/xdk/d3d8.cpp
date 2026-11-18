@@ -628,6 +628,7 @@ HLE_STDCALL(D3DDevice_SetRenderTarget, 2) {
     uint32_t w, h;
     gpu::SurfaceSize(g_state.rt, w, h);
     g_state.viewport = {0, 0, w, h, 0.0f, 1.0f};
+    g_state.scissor_count = 0;
     UpdateViewportConstants();
     return 0;
 }
@@ -639,22 +640,32 @@ HLE_STDCALL(D3DDevice_SetRenderTargetFast, 3) {
     return 0;
 }
 
+namespace {
+void ExternalAddRef(uint32_t res) {
+    if (!res) return;
+    uint32_t common = R32(res);
+    if (!(common & 0xFFFF) && (common & 0x70000) == 0x50000)
+        if (uint32_t parent = R32(res + 0x14)) ExternalAddRef(parent);
+    W32(res, R32(res) + 1);
+}
+}  // namespace
+
 HLE_STDCALL(D3DDevice_GetBackBuffer2, 1) {
     int32_t i = int32_t(a[0]);
     uint32_t s = i < 0 ? g_buffers[0] : g_buffers[std::min<uint32_t>(uint32_t(i) + 1, g_buffer_count - 1)];
-    W32(s, R32(s) + 1);
+    ExternalAddRef(s);
     return s;
 }
 
 HLE_STDCALL(D3DDevice_GetRenderTarget2, 0) {
     uint32_t s = Dev(kDevRenderTarget);
-    if (s) W32(s, R32(s) + 1);
+    ExternalAddRef(s);
     return s;
 }
 
 HLE_STDCALL(D3DDevice_GetDepthStencilSurface2, 0) {
     uint32_t s = Dev(kDevDepth);
-    if (s) W32(s, R32(s) + 1);
+    ExternalAddRef(s);
     return s;
 }
 
