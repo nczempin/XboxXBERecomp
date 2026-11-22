@@ -725,6 +725,13 @@ void MixVoice(Voice& v, float* bins, uint32_t frames) {
             frame[lane.bin] += row[lane.row] * lane.gain;
         }
         v.pos += rate;
+        if (v.looping && !v.stream) {
+            uint32_t start = FramesOf(v, v.loop_start);
+            uint32_t end = FramesOf(v, v.loop_start + v.loop_len);
+            if (end > start && uint32_t(v.pos) >= end) {
+                v.pos = start + std::fmod(v.pos - start, double(end - start));
+            }
+        }
     }
     v.gain = target;
     v.itd = itd;
@@ -1233,9 +1240,11 @@ BUFFER(GetStatus, 2) {
     return 0;
 }
 BUFFER(GetCurrentPosition, 3) {
-    uint32_t p = BytesOf(v, uint32_t(v.pos));
+    uint32_t p = v.play_len ? BytesOf(v, uint32_t(v.pos)) % v.play_len : 0;
+    uint32_t lead_frames = std::max<uint32_t>(64 * 4, (v.freq ? v.freq : v.rate) / 50);
+    if (v.tag == 0x69) lead_frames = (lead_frames + 63) & ~63u;
     if (a[1]) W32(a[1], p);
-    if (a[2]) W32(a[2], v.play_len ? (p + BytesOf(v, 64 * 4)) % v.play_len : 0);
+    if (a[2]) W32(a[2], v.play_len ? (p + BytesOf(v, lead_frames)) % v.play_len : 0);
     return 0;
 }
 BUFFER(SetCurrentPosition, 2) {
