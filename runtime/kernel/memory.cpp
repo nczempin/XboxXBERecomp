@@ -409,6 +409,11 @@ Stats Query() {
     s.system_used = uint32_t(g_system.Used() / kPage);
     uint64_t used = vc + s.contiguous_used + s.system_used;
     s.available_pages = used >= s.total_pages ? 0 : uint32_t(s.total_pages - used);
+    // Host runtime/XBE overhead can push virtual+system+contig near 64 MiB while virtual/contig pools still have headroom;
+    // keep AvailablePages above low-memory save/load guards (e.g. 400 KiB) unless contiguous RAM itself is nearly exhausted.
+    uint32_t contig_free = s.contiguous_used >= s.total_pages ? 0 : s.total_pages - s.contiguous_used;
+    uint32_t floor_pages = contig_free < 1024u ? contig_free : 1024u;
+    if (s.available_pages < floor_pages) s.available_pages = floor_pages;
     return s;
 }
 
