@@ -580,10 +580,21 @@ KERNEL_EXPORT(226, NtSetInformationFile, 5) {
             std::string target = ReadAnsiString(in + 8);
             std::string host = ResolvePath(target, root);
             if (host.empty()) return kObjectPathNotFound;
-            if (f->fp) std::fflush(f->fp);
+            std::lock_guard<std::mutex> lock(f->io);
+            const bool had_fp = f->fp != nullptr;
+            if (f->fp) {
+                std::fclose(f->fp);
+                f->fp = nullptr;
+            }
             fs::rename(f->host, host, ec);
+            if (!ec) f->host = host;
+            if (had_fp) {
+                std::string p = f->host.string();
+                f->fp = std::fopen(p.c_str(), f->writable ? "r+b" : "rb");
+                if (!f->fp && f->writable) f->fp = std::fopen(p.c_str(), "rb");
+                if (f->fp) Seek(f->fp, f->pos);
+            }
             if (ec) return kAccessDenied;
-            f->host = host;
             break;
         }
         case 4:  // basic, times and attributes are not kept
