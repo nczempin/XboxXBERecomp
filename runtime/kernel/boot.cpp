@@ -210,6 +210,7 @@ void Relaunch(const char* exe) {
         ::CloseHandle(pi.hThread);
         ::CloseHandle(pi.hProcess);
     } else {
+        SetEnvironmentVariableW(L"XBOX_HANDOVER_WINDOW", nullptr);
         LOGE("relaunch: cannot start %s.exe (%lu)", exe, GetLastError());
     }
     std::_Exit(0);
