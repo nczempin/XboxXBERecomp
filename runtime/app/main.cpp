@@ -36,6 +36,24 @@ constexpr UINT kApplyDisplay = WM_APP + 1, kOpenWindow = WM_APP + 2;
 bool g_mode_changed = false;
 bool g_apply_posted = false;  // a display apply is waiting in the queue or running
 
+struct HandoverWindow {
+    bool valid = false;
+    bool maximized = false;
+    RECT rc{};
+} g_handover_win;
+
+void ReadHandoverWindow() {
+    wchar_t buf[128]{};
+    DWORD n = GetEnvironmentVariableW(L"XBOX_HANDOVER_WINDOW", buf, DWORD(std::size(buf)));
+    SetEnvironmentVariableW(L"XBOX_HANDOVER_WINDOW", nullptr);
+    if (!n || n >= std::size(buf)) return;
+    int max_flag = 0;
+    long l = 0, t = 0, r = 0, b = 0;
+    if (swscanf_s(buf, L"%d,%ld,%ld,%ld,%ld", &max_flag, &l, &t, &r, &b) == 5 && r > l && b > t) {
+        g_handover_win = {true, max_flag != 0, RECT{l, t, r, b}};
+    }
+}
+
 // crash dump in CrashDumps beside the exe
 LONG WINAPI WriteCrashDump(EXCEPTION_POINTERS* e) {
     // the dump holds no guest memory: the guest registers and return addresses go to the log
@@ -105,13 +123,19 @@ void ApplyNow() {
         GetMonitorInfoW(mon, &mi);
     }
     if (s.display_mode == DisplayMode::Windowed) {
-        RECT r{0, 0, LONG(out.width), LONG(out.height)};
-        AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
-        int w = r.right - r.left, h = r.bottom - r.top;
-        const RECT& a = mi.rcWork;
         SetWindowLongPtrW(g_hwnd, GWL_STYLE, WS_OVERLAPPEDWINDOW | visible);
-        SetWindowPos(g_hwnd, HWND_NOTOPMOST, a.left + (a.right - a.left - w) / 2, a.top + (a.bottom - a.top - h) / 2, w, h,
-                     SWP_FRAMECHANGED);
+        if (g_handover_win.valid) {
+            const RECT& r = g_handover_win.rc;
+            SetWindowPos(g_hwnd, HWND_NOTOPMOST, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                         SWP_FRAMECHANGED | SWP_NOACTIVATE);
+        } else {
+            RECT r{0, 0, LONG(out.width), LONG(out.height)};
+            AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+            int w = r.right - r.left, h = r.bottom - r.top;
+            const RECT& a = mi.rcWork;
+            SetWindowPos(g_hwnd, HWND_NOTOPMOST, a.left + (a.right - a.left - w) / 2, a.top + (a.bottom - a.top - h) / 2,
+                         w, h, SWP_FRAMECHANGED);
+        }
     } else {
         const RECT& m = mi.rcMonitor;
         SetWindowLongPtrW(g_hwnd, GWL_STYLE, WS_POPUP | visible);
@@ -155,12 +179,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             ApplyNow();
             g_apply_posted = false;
             return 0;
-        case kOpenWindow:
+        case kOpenWindow: {
             CloseSplash();
             if (wp) ApplyNow();
-            ShowWindow(hwnd, SW_SHOW);
+            bool max_win = Get().display_mode == DisplayMode::Windowed && g_handover_win.valid && g_handover_win.maximized;
+            g_handover_win.valid = false;
+            ShowWindow(hwnd, max_win ? SW_SHOWMAXIMIZED : SW_SHOW);
             SetForegroundWindow(hwnd);
             return 0;
+        }
         case WM_CLOSE:
             DestroyWindow(hwnd);
             return 0;
@@ -272,6 +299,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
                                   nullptr, nullptr, inst, nullptr);
     // behind a splash the window stays hidden until the game's first frame; handed over, it is set up hidden
     if (handover) {
+        app::ReadHandoverWindow();
         app::ApplyNow();
     } else if (!splash) {
         app::ApplyNow();

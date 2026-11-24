@@ -2,6 +2,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <fstream>
+#include <string>
 
 #include "app/app.h"
 #include "kernel/kernel.h"
@@ -182,6 +183,19 @@ void Relaunch(const char* exe) {
     if (line.find(L"--relaunched") == std::wstring::npos) line += L" --relaunched";  // no boot splash again
     // this process lives on through the handover: the new one binds the same ports
     xnet::CloseSockets();
+    if (HWND hwnd = static_cast<HWND>(app::Window())) {
+        WINDOWPLACEMENT wp{sizeof(wp)};
+        if (GetWindowPlacement(hwnd, &wp)) {
+            bool maximized = (wp.showCmd == SW_SHOWMAXIMIZED) ||
+                             (wp.showCmd == SW_SHOWMINIMIZED && (wp.flags & WPF_RESTORETOMAXIMIZED));
+            std::wstring env = std::to_wstring(maximized ? 1 : 0) + L"," +
+                               std::to_wstring(wp.rcNormalPosition.left) + L"," +
+                               std::to_wstring(wp.rcNormalPosition.top) + L"," +
+                               std::to_wstring(wp.rcNormalPosition.right) + L"," +
+                               std::to_wstring(wp.rcNormalPosition.bottom);
+            SetEnvironmentVariableW(L"XBOX_HANDOVER_WINDOW", env.c_str());
+        }
+    }
     STARTUPINFOW si{sizeof(si)};
     PROCESS_INFORMATION pi{};
     if (CreateProcessW(path.c_str(), line.data(), nullptr, nullptr, FALSE, CREATE_SUSPENDED, nullptr, nullptr, &si, &pi)) {
