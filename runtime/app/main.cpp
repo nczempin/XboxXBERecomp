@@ -125,9 +125,12 @@ void ApplyNow() {
     if (s.display_mode == DisplayMode::Windowed) {
         SetWindowLongPtrW(g_hwnd, GWL_STYLE, WS_OVERLAPPEDWINDOW | visible);
         if (g_handover_win.valid) {
-            const RECT& r = g_handover_win.rc;
-            SetWindowPos(g_hwnd, HWND_NOTOPMOST, r.left, r.top, r.right - r.left, r.bottom - r.top,
-                         SWP_FRAMECHANGED | SWP_NOACTIVATE);
+            WINDOWPLACEMENT wp{sizeof(wp)};
+            wp.showCmd = visible ? (g_handover_win.maximized ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL) : SW_HIDE;
+            wp.rcNormalPosition = g_handover_win.rc;
+            SetWindowPlacement(g_hwnd, &wp);
+            SetWindowPos(g_hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED | SWP_NOACTIVATE);
         } else {
             RECT r{0, 0, LONG(out.width), LONG(out.height)};
             AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
