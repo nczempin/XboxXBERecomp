@@ -59,6 +59,8 @@ std::string Sha1(const std::vector<uint8_t>& data);  // lower case hex
 bool PrepareGameCode(const GameFiles& game);
 int Instance();  // --instance N on the command line, 0 without: a second copy on this PC for system link tests
 void* Window();  // HWND
+void DisableTransitions(void* hwnd, bool disable);
+void FlushDwm();
 // boot splash: GameInfo::splash .bmp or .png beside the exe, up before the game window
 bool OpenSplash();        // window thread, at launch; false without one, and the game window opens at once
 void SplashFirstFrame();  // the game's first Swap: waits out the splash's minimum, then opens the game window
@@ -67,7 +69,8 @@ void OpenGameWindow(bool apply = true);  // any thread but the window thread's; 
 // relaunched: the previous instance keeps its window up until this one has shown its first frames (handover.cpp)
 bool StartHandover();   // window thread, at launch; true: the game window starts hidden
 bool HandingOver();
-void FinishHandover();  // any thread but the window thread's: opens the game window, lets the old instance go
+void ShowHandoverWindow();  // shows the new window while the old instance still stays up
+void FinishHandover();      // any thread but the window thread's: lets the old instance go after a visible frame
 
 // held around ImGui: the window thread's messages and the renderer's frame
 std::recursive_mutex& UiLock();
