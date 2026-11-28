@@ -202,6 +202,7 @@ void Relaunch(const char* exe) {
         // this window stays up until the new instance shows its first frames (HandoverEvent), so no gap shows
         HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, HandoverEvent(pi.dwProcessId).c_str());
         AllowSetForegroundWindow(pi.dwProcessId);
+        app::DisableTransitions(app::Window(), true);
         g_relaunching = true;
         ResumeThread(pi.hThread);
         HANDLE wait[] = {ready, pi.hProcess};

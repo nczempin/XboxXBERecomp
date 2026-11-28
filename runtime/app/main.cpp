@@ -183,12 +183,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_apply_posted = false;
             return 0;
         case kOpenWindow: {
-            CloseSplash();
+            DisableTransitions(hwnd, true);
             if (wp) ApplyNow();
             bool max_win = Get().display_mode == DisplayMode::Windowed && g_handover_win.valid && g_handover_win.maximized;
             g_handover_win.valid = false;
             ShowWindow(hwnd, max_win ? SW_SHOWMAXIMIZED : SW_SHOW);
             SetForegroundWindow(hwnd);
+            CloseSplash();
+            if (!HandingOver()) DisableTransitions(hwnd, false);
             return 0;
         }
         case WM_CLOSE:
@@ -218,6 +220,22 @@ int Instance() {
 }
 
 void* Window() { return g_hwnd; }
+
+void DisableTransitions(void* hwnd, bool disable) {
+    if (!hwnd) return;
+    using SetAttr = HRESULT(WINAPI*)(HWND, DWORD, const void*, DWORD);
+    static auto fn = reinterpret_cast<SetAttr>(GetProcAddress(LoadLibraryW(L"dwmapi.dll"), "DwmSetWindowAttribute"));
+    if (!fn) return;
+    constexpr DWORD kDwmwaTransitionsForcedisabled = 3;
+    BOOL val = disable ? TRUE : FALSE;
+    fn(static_cast<HWND>(hwnd), kDwmwaTransitionsForcedisabled, &val, sizeof(val));
+}
+
+void FlushDwm() {
+    using FlushFn = HRESULT(WINAPI*)();
+    static auto fn = reinterpret_cast<FlushFn>(GetProcAddress(LoadLibraryW(L"dwmapi.dll"), "DwmFlush"));
+    if (fn) fn();
+}
 
 std::recursive_mutex& UiLock() {
     static std::recursive_mutex m;

@@ -20,22 +20,34 @@ namespace app {
 namespace {
 HANDLE g_ready = nullptr;
 std::atomic<bool> g_handing{false};
+std::atomic<bool> g_shown{false};
 }  // namespace
 
 bool StartHandover() {
     g_ready = OpenEventW(EVENT_MODIFY_STATE, FALSE, kernel::HandoverEvent(GetCurrentProcessId()).c_str());
     g_handing = g_ready != nullptr;
+    g_shown = false;
     if (g_handing) LOGI("handover: the previous instance waits for the first frames");
     return g_handing;
 }
 
 bool HandingOver() { return g_handing; }
 
+void ShowHandoverWindow() {
+    if (!g_handing || g_shown.exchange(true)) return;
+    OpenGameWindow(false);
+}
+
 void FinishHandover() {
     if (!g_handing.exchange(false)) return;
-    OpenGameWindow(false);
-    SetEvent(g_ready);
-    CloseHandle(g_ready);
+    if (!g_shown.exchange(true)) OpenGameWindow(false);
+    FlushDwm();
+    if (g_ready) {
+        SetEvent(g_ready);
+        CloseHandle(g_ready);
+        g_ready = nullptr;
+    }
+    DisableTransitions(Window(), false);
 }
 
 }  // namespace app

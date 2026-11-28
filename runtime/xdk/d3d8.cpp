@@ -675,41 +675,38 @@ std::atomic<uint32_t> g_presents{0};
 
 HLE_STDCALL(D3DDevice_Swap, 1) {
     app::SplashFirstFrame();
-    // handed over from the previous instance: the window opens on the second frame, the first picture with
-    // anything drawn over it right after
-    if (app::HandingOver() && g_presents >= 2) {
-        {
-            std::lock_guard<std::recursive_mutex> lock(g_lock);
-            if (g_backend) g_backend->Flush();
+    if (app::HandingOver() && g_presents >= 2) app::ShowHandoverWindow();
+    uint32_t n = 0;
+    {
+        std::lock_guard<std::recursive_mutex> lock(g_lock);
+        g_presents++;
+        // the kept display is shown until the title presents its own
+        kernel::SetSavedDataAddress(0);
+        // the ramp an inlined SetGammaRamp left for the vertical blank that shows this swap
+        if (g_backend && XDK_CDevice_GammaPending != xdk::kUnknown && XDK_CDevice_GammaRamps != xdk::kUnknown) {
+            uint32_t i = Dev(kDevSwapCount) & 1;
+            if (Dev(XDK_CDevice_GammaPending + i * 4) == 1) {
+                SetDev(XDK_CDevice_GammaPending + i * 4, 0);
+                g_backend->SetGamma(static_cast<const uint8_t*>(HostPtr(kDevice + XDK_CDevice_GammaRamps + i * 0x300)));
+            }
         }
-        app::FinishHandover();
-    }
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
-    g_presents++;
-    // the kept display is shown until the title presents its own
-    kernel::SetSavedDataAddress(0);
-    // the ramp an inlined SetGammaRamp left for the vertical blank that shows this swap
-    if (g_backend && XDK_CDevice_GammaPending != xdk::kUnknown && XDK_CDevice_GammaRamps != xdk::kUnknown) {
-        uint32_t i = Dev(kDevSwapCount) & 1;
-        if (Dev(XDK_CDevice_GammaPending + i * 4) == 1) {
-            SetDev(XDK_CDevice_GammaPending + i * 4, 0);
-            g_backend->SetGamma(static_cast<const uint8_t*>(HostPtr(kDevice + XDK_CDevice_GammaRamps + i * 0x300)));
+        Walk(Dev(kDevPush));  // reports asked for at the end of the frame
+        if (g_backend) g_backend->Present(SurfaceOf(g_buffers[1]));
+        if (app::HandingOver() && g_presents >= 3 && g_backend) g_backend->Flush();
+        app::Pace();
+        // like the XDK, the surfaces stay put and their memory rotates: titles keep back buffer pointers and copy its data
+        uint32_t last = g_buffers[g_buffer_count - 1], data = R32(last + 4), lk = R32(last + 8);
+        for (uint32_t i = g_buffer_count - 1; i > 0; i--) {
+            W32(g_buffers[i] + 4, R32(g_buffers[i - 1] + 4));
+            W32(g_buffers[i] + 8, R32(g_buffers[i - 1] + 8));
         }
+        W32(g_buffers[0] + 4, data);
+        W32(g_buffers[0] + 8, lk);
+        g_state.rt = SurfaceOf(Dev(kDevRenderTarget));
+        n = Dev(kDevSwapCount) + 1;
+        SetDev(kDevSwapCount, n);
     }
-    Walk(Dev(kDevPush));  // reports asked for at the end of the frame
-    if (g_backend) g_backend->Present(SurfaceOf(g_buffers[1]));
-    app::Pace();
-    // like the XDK, the surfaces stay put and their memory rotates: titles keep back buffer pointers and copy its data
-    uint32_t last = g_buffers[g_buffer_count - 1], data = R32(last + 4), lk = R32(last + 8);
-    for (uint32_t i = g_buffer_count - 1; i > 0; i--) {
-        W32(g_buffers[i] + 4, R32(g_buffers[i - 1] + 4));
-        W32(g_buffers[i] + 8, R32(g_buffers[i - 1] + 8));
-    }
-    W32(g_buffers[0] + 4, data);
-    W32(g_buffers[0] + 8, lk);
-    g_state.rt = SurfaceOf(Dev(kDevRenderTarget));
-    uint32_t n = Dev(kDevSwapCount) + 1;
-    SetDev(kDevSwapCount, n);
+    if (app::HandingOver() && g_presents >= 3) app::FinishHandover();
     return n;
 }
 
