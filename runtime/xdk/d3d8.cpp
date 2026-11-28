@@ -1337,7 +1337,6 @@ uint32_t g_push_begin = 0;
 namespace d3d {
 namespace {
 uint32_t g_im_prim = 0, g_im_mask = 0;  // open primitive, slots it wrote
-float g_im_attr[64];                    // 16 slots of x y z w
 std::vector<float> g_im_vertices;       // every slot per vertex
 
 // visibility tests: depth passing pixels are counted while enabled, a report gets the count since the clear,
@@ -1391,7 +1390,8 @@ void EndPrimitive() {
 // a begin/end or vertex data method opens, feeds or draws the immediate primitive; false for any other method
 bool ApplyImmediate(uint32_t m, uint32_t v) {
     float f;
-    float* a = g_im_attr;
+    float* base = g_state.def_attr[0].data();
+    float* a = base;
     bool last = true;  // the slot's last component
     std::memcpy(&f, &v, 4);
     if (m == 0x17FC) {  // begin/end, 0 ends
@@ -1427,8 +1427,8 @@ bool ApplyImmediate(uint32_t m, uint32_t v) {
         return false;
     }
     if (!g_im_prim) return true;
-    g_im_mask |= 1u << (a - g_im_attr) / 4;
-    if (a == g_im_attr && last) g_im_vertices.insert(g_im_vertices.end(), g_im_attr, g_im_attr + 64);
+    g_im_mask |= 1u << (a - base) / 4;
+    if (a == base && last) g_im_vertices.insert(g_im_vertices.end(), base, base + 64);
     return true;
 }
 
