@@ -55,6 +55,7 @@ const char* kCommonTail = R"(    float4 spread[4];
     float4 lt[56];
     float4 rtshift;
     float4 zparams;
+    float4 defattr[16];
 };
 )";
 
@@ -133,7 +134,7 @@ std::string Src(const Tok& k, int which, uint16_t regs) {
         base = reg == 12 ? "oPos" : F("R%u", reg);
     } else if (mux == 2) {
         uint32_t v = k.f(1, 9, 4);
-        base = (regs >> v) & 1 ? F("i.v%u", v) : (v == 3 ? "float4(1,1,1,1)" : "float4(0,0,0,1)");
+        base = (regs >> v) & 1 ? F("i.v%u", v) : F("defattr[%u]", v);
     } else {
         uint32_t cr = k.f(1, 13, 8);
         base = k.f(3, 1, 1) ? F("c[clamp(a0 + %u, 0, 191)]", cr) : F("c[%u]", cr);
@@ -915,15 +916,15 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
     auto v = [&](int r, const char* def) { return (regs >> r) & 1 ? F("i.v%d", r) : std::string(def); };
     bool lit = !pretransformed && (f.light & 1);
     if (pretransformed) {
-        s += "    float4 rhw = " + v(0, "float4(0,0,0,1)") + ";\n";
+        s += "    float4 rhw = " + v(0, "defattr[0]") + ";\n";
         s += "    float w = rhw.w == 0 ? 1 : 1 / rhw.w;\n";
         s += "    oPos = float4(rhw.xy, rhw.z / surf.z, w);\n";
     } else {
-        s += "    float4 ip = float4(" + v(0, "float4(0,0,0,1)") + ".xyz, 1);\n";
+        s += "    float4 ip = float4(" + v(0, "defattr[0]") + ".xyz, 1);\n";
         s += "    precise float4 cp = float4(dot(ip, wvp._m00_m10_m20_m30), dot(ip, wvp._m01_m11_m21_m31), "
              "dot(ip, wvp._m02_m12_m22_m32), dot(ip, wvp._m03_m13_m23_m33));\n";
         s += "    float3 vp = mul(ip, wv).xyz;\n";
-        s += "    float3 vn = mul(float4(" + v(2, "float4(0,0,0,0)") + ".xyz, 0), wvn).xyz;\n";
+        s += "    float3 vn = mul(float4(" + v(2, "defattr[2]") + ".xyz, 0), wvn).xyz;\n";
         if (f.light & 8) s += "    vn = dot(vn, vn) > 0 ? normalize(vn) : vn;\n";
     }
     if (lit) {
@@ -964,13 +965,13 @@ std::string FixedVertexHlsl(uint16_t regs, bool pretransformed, uint64_t decode,
         s += "    oD0 = float4(me.rgb + ma.rgb * (amb.rgb + la) + md.rgb * ld, md.a);\n";
         s += (f.light & 2) ? "    oD1 = float4(ms.rgb * ls, ms.a);\n" : "    oD1 = float4(0,0,0,0);\n";
     } else {
-        s += "    oD0 = " + v(3, "float4(1,1,1,1)") + ";\n";
-        s += "    oD1 = " + v(4, "float4(0,0,0,0)") + ";\n";
+        s += "    oD0 = " + v(3, "defattr[3]") + ";\n";
+        s += "    oD1 = " + v(4, "defattr[4]") + ";\n";
     }
     s += "    oB0 = oD0;\n    oB1 = oD1;\n";
     for (int t = 0; t < 4; t++) {
         uint32_t u = f.tex[t], set = u & 3, gen = (u >> 4) & 7, count = (u >> 8) & 7, size = (u >> 12) & 7;
-        std::string in = v(9 + int(set), "float4(0,0,0,1)");
+        std::string in = v(9 + int(set), F("defattr[%d]", 9 + int(set)).c_str());
         if (pretransformed || (!gen && !count)) {
             s += F("    oT%d = %s;\n", t, in.c_str());
             continue;

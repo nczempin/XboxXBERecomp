@@ -2644,6 +2644,7 @@ void D3D12Backend::UploadConstants(const State& s, const DrawShaders& sh, const 
     if (ext_) ext_->Constants(reinterpret_cast<float(*)[4]>(vsc), c.ext, bound_rt_, k.blend ? k.src : 1);
     FillDepthConstants(s, sh, k, c);
     FillTextureConstants(s, sh, stages, c);
+    std::memcpy(c.defattr, s.def_attr.data(), sizeof(c.defattr));
     if (sh.fixed_transform) {
         FillTransformConstants(s, size, c);
         FillLightConstants(s, sh.fk, c);
@@ -3324,7 +3325,8 @@ void D3D12Backend::Copy(const Surface& src, const Surface& dst, uint32_t count, 
     }
     // pixels the CPU made: the copy happens in memory, textures and targets pick it up from there
     if (!src_t || !src_t->drawn) {
-        if (!CopySurfaceMemory(src, dst, count, src_rects, dst_points)) {
+        bool ok = CopySurfaceMemory(src, dst, count, src_rects, dst_points);
+        if (!ok) {
             LOG_FIRST(8, "d3d12: CopyRects %08X to %08X skipped", src.data, dst.data);
         } else if (Target* dst_t = FindTarget(dst, false)) {
             UploadTarget(*dst_t, dst);

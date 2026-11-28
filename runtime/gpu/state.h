@@ -185,6 +185,13 @@ struct State {
     uint32_t light_enable = 0;                         // bit per light
     float ss_offset_x = 0, ss_offset_y = 0;
     float zscale = 16777215.0f;  // depth buffer units per 1.0
+    // NV2A persistent vertex attribute registers (used when an attribute is absent from the vertex streams)
+    std::array<std::array<float, 4>, 16> def_attr{{
+        {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 0}, {1, 1, 1, 1},
+        {0, 0, 0, 0}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1},
+        {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1},
+        {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1},
+    }};
 };
 
 }  // namespace gpu
